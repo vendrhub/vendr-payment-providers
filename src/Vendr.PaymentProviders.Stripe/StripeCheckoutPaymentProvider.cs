@@ -20,6 +20,7 @@ namespace Vendr.PaymentProviders.Stripe
             : base(vendr, logger)
         { }
 
+        private static object CallbackLock = new object();
         public override bool CanFetchPaymentStatus => true;
         public override bool CanCapturePayments => true;
         public override bool CanCancelPayments => true;
@@ -335,104 +336,106 @@ namespace Vendr.PaymentProviders.Stripe
         {
             // The ProcessCallback method is only intendid to be called via a Stripe Webhook and so
             // it's job is to process the webhook event and finalize / update the ctx.Order accordingly
-
-            try
+            lock(CallbackLock)
             {
-                var secretKey = ctx.Settings.TestMode ? ctx.Settings.TestSecretKey : ctx.Settings.LiveSecretKey;
-                var webhookSigningSecret = ctx.Settings.TestMode ? ctx.Settings.TestWebhookSigningSecret : ctx.Settings.LiveWebhookSigningSecret;
-
-                ConfigureStripe(secretKey);
-
-                var stripeEvent = await GetWebhookStripeEventAsync(ctx, webhookSigningSecret);
-                if (stripeEvent != null && stripeEvent.Type == Events.CheckoutSessionCompleted)
+                try
                 {
-                    if (stripeEvent.Data?.Object?.Instance is Session stripeSession)
+                    var secretKey = ctx.Settings.TestMode ? ctx.Settings.TestSecretKey : ctx.Settings.LiveSecretKey;
+                    var webhookSigningSecret = ctx.Settings.TestMode ? ctx.Settings.TestWebhookSigningSecret : ctx.Settings.LiveWebhookSigningSecret;
+    
+                    ConfigureStripe(secretKey);
+    
+                    var stripeEvent = await GetWebhookStripeEventAsync(ctx, webhookSigningSecret);
+                    if (stripeEvent != null && stripeEvent.Type == Events.CheckoutSessionCompleted)
                     {
-                        if (stripeSession.Mode == "payment")
+                        if (stripeEvent.Data?.Object?.Instance is Session stripeSession)
                         {
-                            var paymentIntentService = new PaymentIntentService();
-                            var paymentIntent = await paymentIntentService.GetAsync(stripeSession.PaymentIntentId, new PaymentIntentGetOptions
+                            if (stripeSession.Mode == "payment")
                             {
-                                Expand = new List<string>(new[] {
-                                    "review"
-                                })
-                            });
-
-                            return CallbackResult.Ok(new TransactionInfo
-                            {
-                                TransactionId = GetTransactionId(paymentIntent),
-                                AmountAuthorized = AmountFromMinorUnits(paymentIntent.Amount),
-                                PaymentStatus = GetPaymentStatus(paymentIntent)
-                            },
-                            new Dictionary<string, string>
-                            {
-                                { "stripeSessionId", stripeSession.Id },
-                                { "stripeCustomerId", stripeSession.CustomerId },
-                                { "stripePaymentIntentId", stripeSession.PaymentIntentId },
-                                { "stripeSubscriptionId", stripeSession.SubscriptionId },
-                                { "stripeChargeId", GetTransactionId(paymentIntent) },
-                                { "stripeCardCountry", paymentIntent.Charges?.Data?.FirstOrDefault()?.PaymentMethodDetails?.Card?.Country }
-                            });
-                        }
-                        else if (stripeSession.Mode == "subscription")
-                        {
-                            var subscriptionService = new SubscriptionService();
-                            var subscription = await subscriptionService.GetAsync(stripeSession.SubscriptionId, new SubscriptionGetOptions { 
-                                Expand = new List<string>(new[] { 
-                                    "latest_invoice",
-                                    "latest_invoice.charge",
-                                    "latest_invoice.charge.review",
-                                    "latest_invoice.payment_intent",
-                                    "latest_invoice.payment_intent.review"
-                                })
-                            });
-                            var invoice = subscription.LatestInvoice;
-
-                            return CallbackResult.Ok(new TransactionInfo
-                            {
-                                TransactionId = GetTransactionId(invoice),
-                                AmountAuthorized = AmountFromMinorUnits(invoice.PaymentIntent.Amount),
-                                PaymentStatus = GetPaymentStatus(invoice)
-                            },
-                            new Dictionary<string, string>
-                            {
-                                { "stripeSessionId", stripeSession.Id },
-                                { "stripeCustomerId", stripeSession.CustomerId },
-                                { "stripePaymentIntentId", invoice.PaymentIntentId },
-                                { "stripeSubscriptionId", stripeSession.SubscriptionId },
-                                { "stripeChargeId", invoice.ChargeId },
-                                { "stripeCardCountry", invoice.Charge?.PaymentMethodDetails?.Card?.Country }
-                            });
-                        }
-                    }
-                    else if (stripeEvent != null && stripeEvent.Type == Events.ReviewClosed)
-                    {
-                        if (stripeEvent.Data?.Object?.Instance is Review stripeReview && !string.IsNullOrWhiteSpace(stripeReview.PaymentIntentId))
-                        {
-                            var paymentIntentService = new PaymentIntentService();
-                            var paymentIntent = paymentIntentService.Get(stripeReview.PaymentIntentId, new PaymentIntentGetOptions
+                                var paymentIntentService = new PaymentIntentService();
+                                var paymentIntent = await paymentIntentService.GetAsync(stripeSession.PaymentIntentId, new PaymentIntentGetOptions
                                 {
                                     Expand = new List<string>(new[] {
-                                    "review"
-                                })
-                            });
-
-                            return CallbackResult.Ok(new TransactionInfo
+                                        "review"
+                                    })
+                                });
+    
+                                return CallbackResult.Ok(new TransactionInfo
+                                {
+                                    TransactionId = GetTransactionId(paymentIntent),
+                                    AmountAuthorized = AmountFromMinorUnits(paymentIntent.Amount),
+                                    PaymentStatus = GetPaymentStatus(paymentIntent)
+                                },
+                                new Dictionary<string, string>
+                                {
+                                    { "stripeSessionId", stripeSession.Id },
+                                    { "stripeCustomerId", stripeSession.CustomerId },
+                                    { "stripePaymentIntentId", stripeSession.PaymentIntentId },
+                                    { "stripeSubscriptionId", stripeSession.SubscriptionId },
+                                    { "stripeChargeId", GetTransactionId(paymentIntent) },
+                                    { "stripeCardCountry", paymentIntent.Charges?.Data?.FirstOrDefault()?.PaymentMethodDetails?.Card?.Country }
+                                });
+                            }
+                            else if (stripeSession.Mode == "subscription")
                             {
-                                TransactionId = GetTransactionId(paymentIntent),
-                                AmountAuthorized = AmountFromMinorUnits(paymentIntent.Amount),
-                                PaymentStatus = GetPaymentStatus(paymentIntent)
-                            });
+                                var subscriptionService = new SubscriptionService();
+                                var subscription = await subscriptionService.GetAsync(stripeSession.SubscriptionId, new SubscriptionGetOptions { 
+                                    Expand = new List<string>(new[] { 
+                                        "latest_invoice",
+                                        "latest_invoice.charge",
+                                        "latest_invoice.charge.review",
+                                        "latest_invoice.payment_intent",
+                                        "latest_invoice.payment_intent.review"
+                                    })
+                                });
+                                var invoice = subscription.LatestInvoice;
+    
+                                return CallbackResult.Ok(new TransactionInfo
+                                {
+                                    TransactionId = GetTransactionId(invoice),
+                                    AmountAuthorized = AmountFromMinorUnits(invoice.PaymentIntent.Amount),
+                                    PaymentStatus = GetPaymentStatus(invoice)
+                                },
+                                new Dictionary<string, string>
+                                {
+                                    { "stripeSessionId", stripeSession.Id },
+                                    { "stripeCustomerId", stripeSession.CustomerId },
+                                    { "stripePaymentIntentId", invoice.PaymentIntentId },
+                                    { "stripeSubscriptionId", stripeSession.SubscriptionId },
+                                    { "stripeChargeId", invoice.ChargeId },
+                                    { "stripeCardCountry", invoice.Charge?.PaymentMethodDetails?.Card?.Country }
+                                });
+                            }
+                        }
+                        else if (stripeEvent != null && stripeEvent.Type == Events.ReviewClosed)
+                        {
+                            if (stripeEvent.Data?.Object?.Instance is Review stripeReview && !string.IsNullOrWhiteSpace(stripeReview.PaymentIntentId))
+                            {
+                                var paymentIntentService = new PaymentIntentService();
+                                var paymentIntent = paymentIntentService.Get(stripeReview.PaymentIntentId, new PaymentIntentGetOptions
+                                    {
+                                        Expand = new List<string>(new[] {
+                                        "review"
+                                    })
+                                });
+    
+                                return CallbackResult.Ok(new TransactionInfo
+                                {
+                                    TransactionId = GetTransactionId(paymentIntent),
+                                    AmountAuthorized = AmountFromMinorUnits(paymentIntent.Amount),
+                                    PaymentStatus = GetPaymentStatus(paymentIntent)
+                                });
+                            }
                         }
                     }
                 }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex, "Stripe - ProcessCallback");
+                }
+    
+                return CallbackResult.BadRequest();
             }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "Stripe - ProcessCallback");
-            }
-
-            return CallbackResult.BadRequest();
         }
 
         public override async Task<ApiResult> FetchPaymentStatusAsync(PaymentProviderContext<StripeCheckoutSettings> ctx)
